@@ -29,6 +29,14 @@ Beim ersten Zugriff fragt macOS evtl. nach Ordnerrechten. Bitte erlauben.
 .venv/bin/python rename_invoices.py --dry-run
 ```
 
+Bereits erfolgreich verarbeitete Dateien werden durch ihren Dateiinhalt erkannt und nicht erneut
+verarbeitet. Für einen gezielten Wiederholungstest kann eine Datei mit `--force` verarbeitet werden:
+```bash
+.venv/bin/python rename_invoices.py --force --dry-run ~/Dokumente/Beispiel.pdf
+```
+Unsichere Dateien oder Fehler bei Ollama werden nicht als erfolgreich verarbeitet gespeichert und
+können daher beim nächsten Durchlauf erneut versucht werden.
+
 ## Funktionsweise
 - Ein launchd-Agent startet das Skript, sobald sich der Ordner ändert, sowie täglich um 12:00. Es läuft nur kurz und beendet sich wieder.
 - Pro Datei: Text auslesen (bei Scans OCR) → KI ermittelt Firma, Leistung und Rechnungsdatum → Umbenennen.

@@ -55,9 +55,37 @@ ensure_brew_pkg() {
 }
 
 setup_venv() {
-  command -v python3 >/dev/null 2>&1 || ensure_brew_pkg python
+  local python_bin=""
+  local candidate
+
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3 /usr/bin/python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      candidate="$(command -v "$candidate")"
+    elif [ -x "$candidate" ]; then
+      :
+    else
+      continue
+    fi
+
+    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] in ((3, 11), (3, 12), (3, 13), (3, 14)) else 1)' 2>/dev/null; then
+      python_bin="$candidate"
+      break
+    fi
+  done
+
+  if [ -z "$python_bin" ]; then
+    ensure_brew_pkg python@3.13
+    python_bin="/opt/homebrew/bin/python3.13"
+    [ -x "$python_bin" ] || python_bin="/usr/local/bin/python3.13"
+  fi
+
+  [ -n "$python_bin" ] && [ -x "$python_bin" ] || die "Unterstuetzbares Python 3.11-3.14 nicht gefunden."
   info "Richte Python-Umgebung ein"
-  [ -d "$VENV" ] || run python3 -m venv "$VENV"
+  if [ -x "$VENV/bin/python" ] && ! "$VENV/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] in ((3, 11), (3, 12), (3, 13), (3, 14)) else 1)' 2>/dev/null; then
+    info "Ersetze inkompatible Python-Umgebung"
+    run rm -rf "$VENV"
+  fi
+  [ -d "$VENV" ] || run "$python_bin" -m venv "$VENV"
   run "$VENV/bin/pip" install --quiet --upgrade pip
   run "$VENV/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 }

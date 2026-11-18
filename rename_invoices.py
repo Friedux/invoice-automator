@@ -317,9 +317,9 @@ def wait_until_stable(path: Path, seconds: float) -> bool:
         return False
 
 
-def process_file(cfg: dict, path: Path, state: dict, dry_run: bool) -> None:
+def process_file(cfg: dict, path: Path, state: dict, dry_run: bool, force: bool = False) -> None:
     digest = file_hash(path)
-    if digest in state["processed"]:
+    if not force and digest in state["processed"]:
         return
     review_dir = cfg["watch_folder"] / cfg["review_subfolder"]
     try:
@@ -346,10 +346,11 @@ def process_file(cfg: dict, path: Path, state: dict, dry_run: bool) -> None:
     target.parent.mkdir(exist_ok=True)
     path.rename(target)
     log.info("%s -> %s", path.name, target.relative_to(cfg["watch_folder"]))
-    state["processed"].append(digest)
+    if stem:
+        state["processed"].append(digest)
 
 
-def run(cfg: dict, dry_run: bool, only: list[Path] | None) -> None:
+def run(cfg: dict, dry_run: bool, only: list[Path] | None, force: bool = False) -> None:
     folder = cfg["watch_folder"]
     if not folder.is_dir():
         log.error("Ordner %s existiert nicht", folder)
@@ -362,7 +363,7 @@ def run(cfg: dict, dry_run: bool, only: list[Path] | None) -> None:
         if not wait_until_stable(path, cfg["stable_seconds"]):
             log.info("%s: noch nicht fertig kopiert, uebersprungen", path.name)
             continue
-        process_file(cfg, path, state, dry_run)
+        process_file(cfg, path, state, dry_run, force)
         if not dry_run:
             save_state(state)
 
@@ -434,6 +435,7 @@ def main() -> int:
     ap.add_argument("--config", type=Path, default=CONFIG_PATH)
     ap.add_argument("--dry-run", action="store_true", help="nur anzeigen, nichts veraendern")
     ap.add_argument("--check-update", action="store_true", help="Update-Pruefung erzwingen")
+    ap.add_argument("--force", action="store_true", help="bereits verarbeitete Dateien erneut pruefen")
     ap.add_argument("--write-config", action="store_true", help="config.yaml erzeugen (Installer)")
     ap.add_argument("--folder", default=DEFAULTS["watch_folder"])
     ap.add_argument("--date-format", default=DEFAULTS["date_format"])
@@ -470,7 +472,7 @@ def main() -> int:
         except BlockingIOError:
             log.info("Es laeuft bereits eine Instanz")
             return 0
-        run(cfg, args.dry_run, [p.expanduser().resolve() for p in args.files] or None)
+        run(cfg, args.dry_run, [p.expanduser().resolve() for p in args.files] or None, args.force)
         check_updates(cfg)
     return 0
 
