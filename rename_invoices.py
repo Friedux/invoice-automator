@@ -35,6 +35,8 @@ DEFAULTS = {
     "review_subfolder": "_pruefen",
     "date_format": "%Y-%m-%d",
     "name_pattern": "{firma}_{leistung}_{datum}",
+    "markDuplicates": True,
+    "duplicateText": "-duplikat",
     "ollama_url": "http://localhost:11434",
     "model": "qwen2.5:3b",
     "keep_alive": 0,
@@ -55,6 +57,8 @@ date_format: "{date_format}"        # strftime, z. B. %Y-%m-%d oder %d.%m.%Y
 name_pattern: "{name_pattern}"   # Schema des Dateinamens, siehe README
                                     # Platzhalter: {{firma}} {{leistung}} {{datum}} {{jahr}} {{monat}} {{tag}}
                                     #   {{rechnungsnummer}} {{betrag}}; Datum frei: {{datum:%Y-%m}}
+markDuplicates: true
+duplicateText: "-duplikat"
 ollama_url: "{ollama_url}"          # spaeter z. B. http://NAS-IP:11434
 model: "{model}"
 keep_alive: 0                       # 0 = RAM direkt nach Anfrage freigeben
@@ -99,14 +103,20 @@ def write_config(path: Path, folder: str, date_format: str, model: str, ollama_u
 def load_state() -> dict:
     if STATE_PATH.exists():
         try:
-            return json.loads(STATE_PATH.read_text())
+            state = json.loads(STATE_PATH.read_text())
+            state.setdefault("outputs", {})
+            return state
         except json.JSONDecodeError:
             log.warning("state.json beschaedigt, wird neu angelegt")
-    return {"processed": [], "last_update_check": 0, "notified_update": ""}
+    return {"processed": [], "outputs": {}, "last_update_check": 0, "notified_update": ""}
 
 
 def save_state(state: dict) -> None:
     state["processed"] = state["processed"][-5000:]
+    state["outputs"] = {
+        digest: paths for digest, paths in state.get("outputs", {}).items()
+        if digest in state["processed"]
+    }
     STATE_PATH.write_text(json.dumps(state, indent=1))
 
 
@@ -307,6 +317,18 @@ def unique_path(folder: Path, stem: str, ext: str) -> Path:
     return target
 
 
+def duplicate_path(folder: Path, stem: str, ext: str, marker: str) -> Path:
+    marker = re.sub(r'[/\\:\x00]', "-", marker).strip(" .")
+    if not marker:
+        raise ValueError("duplicateText darf nach Bereinigung nicht leer sein")
+    target = folder / f"{stem}{marker}{ext}"
+    n = 2
+    while target.exists():
+        target = folder / f"{stem}{marker}_{n}{ext}"
+        n += 1
+    return target
+
+
 # --------------------------------------------------------------------------- processing
 def wait_until_stable(path: Path, seconds: float) -> bool:
     try:
@@ -319,14 +341,22 @@ def wait_until_stable(path: Path, seconds: float) -> bool:
 
 def process_file(cfg: dict, path: Path, state: dict, dry_run: bool, force: bool = False) -> None:
     digest = file_hash(path)
-    if not force and digest in state["processed"]:
+    relative_path = path.relative_to(cfg["watch_folder"]).as_posix()
+    processed = digest in state["processed"]
+    known_outputs = state.setdefault("outputs", {}).get(digest, [])
+    is_known_output = relative_path in known_outputs
+    is_duplicate = processed and not is_known_output and cfg["markDuplicates"]
+    if not force and processed and (is_known_output or not cfg["markDuplicates"]):
         return
     review_dir = cfg["watch_folder"] / cfg["review_subfolder"]
     try:
-        text = extract_text(path, cfg["min_text_chars"])
-        if not text:
-            raise RuntimeError("kein Text erkannt")
-        stem = build_name(cfg, ask_llm(cfg, text))
+        if is_duplicate and known_outputs:
+            stem = Path(known_outputs[0]).stem
+        else:
+            text = extract_text(path, cfg["min_text_chars"])
+            if not text:
+                raise RuntimeError("kein Text erkannt")
+            stem = build_name(cfg, ask_llm(cfg, text))
     except urllib.error.URLError as e:
         log.error("%s: Ollama nicht erreichbar (%s), wird spaeter erneut versucht", path.name, e)
         return
@@ -334,7 +364,9 @@ def process_file(cfg: dict, path: Path, state: dict, dry_run: bool, force: bool 
         log.warning("%s: Fehler (%s)", path.name, e)
         stem = None
 
-    if stem:
+    if stem and is_duplicate:
+        target = duplicate_path(path.parent, stem, path.suffix.lower(), cfg["duplicateText"])
+    elif stem:
         target = unique_path(path.parent, stem, path.suffix.lower())
     else:
         target = unique_path(review_dir, path.stem, path.suffix)
@@ -347,7 +379,24 @@ def process_file(cfg: dict, path: Path, state: dict, dry_run: bool, force: bool 
     path.rename(target)
     log.info("%s -> %s", path.name, target.relative_to(cfg["watch_folder"]))
     if stem:
-        state["processed"].append(digest)
+        if not processed:
+            state["processed"].append(digest)
+        outputs = state.setdefault("outputs", {}).setdefault(digest, [])
+        output_path = target.relative_to(cfg["watch_folder"]).as_posix()
+        if output_path not in outputs:
+            outputs.append(output_path)
+
+
+def migrate_state_outputs(folder: Path, state: dict, extensions: set[str]) -> None:
+    if state.get("outputs_migrated"):
+        return
+    legacy_hashes = set(state["processed"]) - set(state.get("outputs", {}))
+    for path in folder.iterdir():
+        if path.is_file() and path.suffix.lower() in extensions and not path.name.startswith("."):
+            digest = file_hash(path)
+            if digest in legacy_hashes:
+                state.setdefault("outputs", {}).setdefault(digest, []).append(path.name)
+    state["outputs_migrated"] = True
 
 
 def run(cfg: dict, dry_run: bool, only: list[Path] | None, force: bool = False) -> None:
@@ -356,9 +405,12 @@ def run(cfg: dict, dry_run: bool, only: list[Path] | None, force: bool = False) 
         log.error("Ordner %s existiert nicht", folder)
         return
     exts = {e.lower() for e in cfg["extensions"]}
+    state = load_state()
+    migrate_state_outputs(folder, state, exts)
+    if not dry_run:
+        save_state(state)
     files = only or sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts
                            and not p.name.startswith("."))
-    state = load_state()
     for path in files:
         if not wait_until_stable(path, cfg["stable_seconds"]):
             log.info("%s: noch nicht fertig kopiert, uebersprungen", path.name)

@@ -40,7 +40,7 @@ können daher beim nächsten Durchlauf erneut versucht werden.
 ## Funktionsweise
 - Ein launchd-Agent startet das Skript, sobald sich der Ordner ändert, sowie täglich um 12:00. Es läuft nur kurz und beendet sich wieder.
 - Pro Datei: Text auslesen (bei Scans OCR) → KI ermittelt Firma, Leistung und Rechnungsdatum → Umbenennen.
-- Bei Duplikaten wird `_2`, `_3` usw. angehängt.
+- Dateien mit identischem Inhalt (SHA-256) werden mit dem konfigurierten Duplikattext markiert; weitere Kopien erhalten zusätzlich `_2`, `_3` usw.
 - Unsichere Dateien (fehlende Angaben, keine Rechnung) werden nach `_pruefen/` verschoben und nicht umbenannt.
 - Bereits verarbeitete Dateien werden nicht erneut verarbeitet.
 - Log: `rechnungen.log` im Programmordner.
@@ -53,6 +53,8 @@ können daher beim nächsten Durchlauf erneut versucht werden.
 | `watch_folder` | Ordner mit den Rechnungen |
 | `date_format` | Datumsformat (strftime) für `{datum}`, z. B. `%Y-%m-%d` |
 | `name_pattern` | Schema des Dateinamens, siehe unten |
+| `markDuplicates` | Identische Datei-Inhalte als Duplikate markieren (`true`/`false`) |
+| `duplicateText` | Text am Dateinamen für Duplikate, Standard `-duplikat` |
 | `model` | Ollama-Modell, z. B. `qwen2.5:7b` für bessere Qualität (braucht mehr RAM) |
 | `ollama_url` | z. B. `http://NAS-IP:11434`, um Ollama auf einem anderen Gerät zu nutzen |
 | `keep_alive` | `0` gibt den RAM direkt nach jeder Anfrage frei |
