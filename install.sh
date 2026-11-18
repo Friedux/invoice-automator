@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Installiert Abhaengigkeiten, erzeugt die Konfiguration und richtet den launchd-Agent ein.
-# Optionen: --dry-run  --yes  --folder PFAD  --date-format FORMAT  --model MODELL
+# Optionen: --dry-run  --yes  --folder PFAD  --date-format FORMAT  --name-pattern SCHEMA  --model MODELL
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-FOLDER="" ; DATE_FORMAT="" ; MODEL="" ; YES=0
+FOLDER="" ; DATE_FORMAT="" ; NAME_PATTERN="" ; MODEL="" ; YES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y) YES=1 ;;
     --folder) FOLDER="$2"; shift ;;
     --date-format) DATE_FORMAT="$2"; shift ;;
+    --name-pattern) NAME_PATTERN="$2"; shift ;;
     --model) MODEL="$2"; shift ;;
     -h|--help) sed -n '2,3p' "$0"; exit 0 ;;
     *) die "Unbekannte Option: $1" ;;
@@ -51,6 +52,28 @@ if [ -z "$DATE_FORMAT" ]; then
   fi
 fi
 case "$DATE_FORMAT" in */*|*:*) die "Format darf kein '/' oder ':' enthalten (ungueltig in Dateinamen)" ;; esac
+
+if [ -z "$NAME_PATTERN" ]; then
+  NAME_PATTERN="{firma}_{leistung}_{datum}"
+  if [ "$YES" != 1 ]; then
+    echo "Schema fuer Dateinamen:"
+    echo "  1) {firma}_{leistung}_{datum}"
+    echo "  2) {datum}_{firma}_{leistung}"
+    echo "  3) {datum}_{firma}_{rechnungsnummer}"
+    echo "  4) {firma}_{leistung}_{betrag}_{datum}"
+    echo "  5) eigenes Schema"
+    echo "Platzhalter: {firma} {leistung} {datum} {jahr} {monat} {tag} {rechnungsnummer} {betrag}, Datum frei: {datum:%Y-%m}"
+    read -r -p "Auswahl [1]: " c
+    case "${c:-1}" in
+      1) NAME_PATTERN="{firma}_{leistung}_{datum}" ;;
+      2) NAME_PATTERN="{datum}_{firma}_{leistung}" ;;
+      3) NAME_PATTERN="{datum}_{firma}_{rechnungsnummer}" ;;
+      4) NAME_PATTERN="{firma}_{leistung}_{betrag}_{datum}" ;;
+      5) read -r -p "Schema: " NAME_PATTERN ;;
+      *) die "Ungueltige Auswahl" ;;
+    esac
+  fi
+fi
 MODEL="${MODEL:-qwen2.5:3b}"
 
 # ---- Abhaengigkeiten
@@ -65,12 +88,12 @@ if [ -f "$CONFIG" ] && [ "$YES" != 1 ] && [ "$DRY_RUN" != 1 ]; then
   [ "$o" = j ] || [ "$o" = J ] || { info "Behalte bestehende Konfiguration"; KEEP_CFG=1; }
 fi
 if [ -z "${KEEP_CFG:-}" ]; then
-  info "Schreibe config.yaml (Ordner: $FOLDER, Datum: $DATE_FORMAT, Modell: $MODEL)"
+  info "Schreibe config.yaml (Ordner: $FOLDER, Datum: $DATE_FORMAT, Schema: $NAME_PATTERN, Modell: $MODEL)"
   if [ "$DRY_RUN" = 1 ]; then
-    echo "[dry-run] rename_invoices.py --write-config --folder '$FOLDER' --date-format '$DATE_FORMAT' --model '$MODEL'"
+    echo "[dry-run] rename_invoices.py --write-config --folder '$FOLDER' --date-format '$DATE_FORMAT' --name-pattern '$NAME_PATTERN' --model '$MODEL'"
   else
     "$VENV/bin/python" "$APP_DIR/rename_invoices.py" --write-config \
-      --folder "$FOLDER" --date-format "$DATE_FORMAT" --model "$MODEL"
+      --folder "$FOLDER" --date-format "$DATE_FORMAT" --name-pattern "$NAME_PATTERN" --model "$MODEL"
   fi
 fi
 

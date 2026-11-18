@@ -34,7 +34,7 @@ DEFAULTS = {
     "watch_folder": "~/Documents/Rechnungen",
     "review_subfolder": "_pruefen",
     "date_format": "%Y-%m-%d",
-    "separator": "_",
+    "name_pattern": "{firma}_{leistung}_{datum}",
     "ollama_url": "http://localhost:11434",
     "model": "qwen2.5:3b",
     "keep_alive": 0,
@@ -52,7 +52,9 @@ CONFIG_TEMPLATE = """\
 watch_folder: "{watch_folder}"      # Ordner mit den Rechnungen
 review_subfolder: "_pruefen"        # unsichere Dateien landen hier
 date_format: "{date_format}"        # strftime, z. B. %Y-%m-%d oder %d.%m.%Y
-separator: "_"                      # Trenner im Dateinamen
+name_pattern: "{name_pattern}"   # Schema des Dateinamens, siehe README
+                                    # Platzhalter: {{firma}} {{leistung}} {{datum}} {{jahr}} {{monat}} {{tag}}
+                                    #   {{rechnungsnummer}} {{betrag}}; Datum frei: {{datum:%Y-%m}}
 ollama_url: "{ollama_url}"          # spaeter z. B. http://NAS-IP:11434
 model: "{model}"
 keep_alive: 0                       # 0 = RAM direkt nach Anfrage freigeben
@@ -76,15 +78,18 @@ def load_config(path: Path) -> dict:
     if path.exists():
         cfg.update(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
     cfg["watch_folder"] = Path(str(cfg["watch_folder"])).expanduser()
+    validate_pattern(cfg["name_pattern"])
     return cfg
 
 
-def write_config(path: Path, folder: str, date_format: str, model: str, ollama_url: str) -> None:
-    for fmt_check in (date_format,):
-        datetime(2000, 1, 2).strftime(fmt_check)
+def write_config(path: Path, folder: str, date_format: str, model: str, ollama_url: str,
+                 name_pattern: str = DEFAULTS["name_pattern"]) -> None:
+    datetime(2000, 1, 2).strftime(date_format)
+    validate_pattern(name_pattern)
     path.write_text(
         CONFIG_TEMPLATE.format(
-            watch_folder=folder, date_format=date_format, model=model, ollama_url=ollama_url
+            watch_folder=folder, date_format=date_format, model=model, ollama_url=ollama_url,
+            name_pattern=name_pattern,
         ),
         encoding="utf-8",
     )
@@ -180,9 +185,11 @@ PROMPT = """Du bekommst den Text einer Rechnung. Extrahiere:
 - firma: Name des Rechnungsstellers (Aussteller), kurz, ohne Rechtsform wie GmbH/AG
 - leistung: Kurzbeschreibung der Leistung/des Produkts in 1-3 Woertern (z. B. "Strom", "Internet", "Hosting", "Reparatur")
 - rechnungsdatum: Rechnungsdatum im Format YYYY-MM-DD
+- rechnungsnummer: Rechnungsnummer (nur falls klar erkennbar)
+- betrag: Gesamtbetrag brutto als Zahl mit Punkt, z. B. 123.45 (ohne Waehrung)
 
 Antworte NUR mit JSON in der Form:
-{{"ist_rechnung": true, "firma": "...", "leistung": "...", "rechnungsdatum": "YYYY-MM-DD"}}
+{{"ist_rechnung": true, "firma": "...", "leistung": "...", "rechnungsdatum": "YYYY-MM-DD", "rechnungsnummer": "...", "betrag": 0.0}}
 Wenn etwas nicht erkennbar ist, setze den Wert auf null.
 
 Text:
@@ -238,16 +245,57 @@ def parse_date(value) -> datetime | None:
     return d if 2000 <= d.year <= datetime.now().year + 1 else None
 
 
+PLACEHOLDER = re.compile(r"\{(\w+)(?::([^}]*))?\}")
+FIELDS = {"firma", "leistung", "datum", "jahr", "monat", "tag", "rechnungsnummer", "betrag"}
+
+
+def validate_pattern(pattern: str) -> None:
+    names = {m[1] for m in PLACEHOLDER.finditer(pattern)}
+    if not names:
+        raise ValueError("Schema enthaelt keinen Platzhalter, z. B. {firma}_{leistung}_{datum}")
+    unknown = names - FIELDS
+    if unknown:
+        raise ValueError(f"Unbekannte Platzhalter: {', '.join(sorted(unknown))}. Erlaubt: {', '.join(sorted(FIELDS))}")
+    for m in PLACEHOLDER.finditer(pattern):
+        if m[2] is not None and m[1] != "datum":
+            raise ValueError(f"Format-Angabe nur bei {{datum:...}} erlaubt, nicht bei {{{m[1]}}}")
+        if m[2]:
+            datetime(2000, 1, 2).strftime(m[2])
+
+
 def build_name(cfg: dict, data: dict) -> str | None:
     """Gibt den Dateinamen (ohne Endung) zurueck oder None, wenn unsicher."""
     if data.get("ist_rechnung") is False:
         return None
-    firma = clean_part(str(data.get("firma") or ""))
-    leistung = clean_part(str(data.get("leistung") or ""))
     datum = parse_date(data.get("rechnungsdatum"))
-    if not (firma and leistung and datum):
-        return None
-    return cfg["separator"].join([firma, leistung, datum.strftime(cfg["date_format"])])
+    try:
+        betrag = f"{float(data.get('betrag')):.2f}"
+    except (TypeError, ValueError):
+        betrag = ""
+    values = {
+        "firma": clean_part(str(data.get("firma") or "")),
+        "leistung": clean_part(str(data.get("leistung") or "")),
+        "rechnungsnummer": clean_part(str(data.get("rechnungsnummer") or "")),
+        "betrag": betrag,
+    }
+    failed = False
+
+    def fill(m: re.Match) -> str:
+        nonlocal failed
+        key, fmt = m[1], m[2]
+        if key in {"datum", "jahr", "monat", "tag"}:
+            if not datum:
+                failed = True
+                return ""
+            return datum.strftime({"jahr": "%Y", "monat": "%m", "tag": "%d"}.get(
+                key, fmt or cfg["date_format"]))
+        if not values[key]:
+            failed = True
+        return values[key]
+
+    name = PLACEHOLDER.sub(fill, cfg["name_pattern"])
+    name = re.sub(r'[/\\:\x00]', "-", name).strip(" .")
+    return None if failed or not name else name
 
 
 def unique_path(folder: Path, stem: str, ext: str) -> Path:
@@ -390,12 +438,14 @@ def main() -> int:
     ap.add_argument("--folder", default=DEFAULTS["watch_folder"])
     ap.add_argument("--date-format", default=DEFAULTS["date_format"])
     ap.add_argument("--model", default=DEFAULTS["model"])
+    ap.add_argument("--name-pattern", default=DEFAULTS["name_pattern"])
     ap.add_argument("--ollama-url", default=DEFAULTS["ollama_url"])
     ap.add_argument("--get", metavar="KEY", help="Konfigurationswert ausgeben (fuer Skripte)")
     args = ap.parse_args()
 
     if args.write_config:
-        write_config(args.config, args.folder, args.date_format, args.model, args.ollama_url)
+        write_config(args.config, args.folder, args.date_format, args.model, args.ollama_url,
+                     args.name_pattern)
         print(f"Konfiguration geschrieben: {args.config}")
         return 0
 
